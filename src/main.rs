@@ -40,6 +40,8 @@ type WPARAM = UINT_PTR;
 type WNDPROC = *const c_void;
 
 type HANDLE = PVOID;
+type HFONT = HANDLE;
+type HBITMAP = HANDLE;
 type HBRUSH = HANDLE;
 type HCURSOR = HANDLE;
 type HDC = HANDLE;
@@ -83,6 +85,7 @@ static WS_OVERLAPPEDWINDOW: u32 = 0xcf0000;
 const WM_CHAR: UINT = 0x0102;
 const WM_DESTROY: UINT = 0x0002;
 const WM_PAINT: UINT = 0x000F;
+const WM_ERASEBKGND: UINT = 0x0014;
 
 const VK_RETURN: UINT = 0x000D;
 const VK_BACK:   UINT = 0x0008;
@@ -93,8 +96,10 @@ const VK_DOWN:   UINT = 0x0028;
 
 const TRANSPARENT: c_int = 1;
 const OPAQUE:      c_int = 2;
+const SRCCOPY:     DWORD = 0xcc0020;
 
 const WHITE_BRUSH: c_int = 0;
+const ANSI_FIXED_FONT: c_int = 11;
 const DC_BRUSH: c_int = 18;
 const DC_PEN:   c_int = 19;
 // 0      WHITE_BRUSH
@@ -255,6 +260,36 @@ extern "system" {
 		hdc: HDC,
 		hgdiObj: HGDIOBJ,
 	) -> HGDIOBJ;
+
+	fn DeleteObject(
+		hgdiObj: HGDIOBJ,
+	) -> BOOL;
+
+	fn DeleteDC(
+		hdc: HDC,
+	) -> BOOL;
+
+	fn CreateCompatibleDC(
+		hdc: HDC,
+	) -> HDC;
+
+	fn CreateCompatibleBitmap(
+  		hdc: HDC,
+  		nWidth: c_int,
+  		nHeight: c_int,
+	) -> HBITMAP;
+
+	fn BitBlt(
+	  hdcDest: HDC,
+	  nXDest: c_int,
+	  nYDest: c_int,
+	  nWidth: c_int,
+	  nHeight: c_int,
+	  hdcSrc: HDC,
+	  nXSrc: c_int,
+	  nYSrc: c_int,
+	  dwRop: DWORD,
+	) -> BOOL;
 }
 
 
@@ -312,7 +347,7 @@ fn main() { unsafe {
 			time: 0 as DWORD,
 			pt: POINT {
 				x: 0, 
-				y:0,
+				y: 0,
 			},
     };
 
@@ -353,10 +388,10 @@ fn stage(buffer: &Buffer) -> Canvas {
 
 	let curx = buffer.cursor.x;
 	let cury = buffer.cursor.y;
-	let mut rects: Vec<Rect> = vec![
+	let rects: Vec<Rect> = vec![
 		Rect { 
-			lt: Pos { x:  curx    * 10, y:  cury    * 14 }, 
-			rb: Pos { x: (curx+1) * 10, y: (cury+1) * 14 },
+			lt: Pos { x:  curx    * 8, y:  cury    * 14 }, 
+			rb: Pos { x: (curx+1) * 8, y: (cury+1) * 14 },
 		},
 	];
 
@@ -377,29 +412,48 @@ unsafe fn paint(hwnd: HWND, canvas: &Canvas) {
 		fIncUpdate: 0 as BOOL,
 		rgbReserved: [0 as BYTE, ..32],
 	};
-
-	let hdc = BeginPaint(hwnd, &mut ps);
-
-	let old_obj = SelectObject(hdc, GetStockObject(DC_BRUSH));
-	SelectObject(hdc, GetStockObject(DC_PEN));
-
 	
-	let old_brush_color = SetDCBrushColor(hdc, 0x00FFAAAA as COLORREF); //0x00bbggrr
-	let old_pen_color   = SetDCPenColor  (hdc, 0x00FFDDDD as COLORREF); //0x00bbggrr 
-	for &rect in canvas.rects.iter() {
-		Rectangle(hdc, rect.lt.x as c_int, rect.lt.y as c_int, rect.rb.x as c_int, rect.rb.y as c_int);
-	}
-	SetDCBrushColor(hdc, old_brush_color);
-	SetDCPenColor(hdc, old_pen_color);
+	let front_hdc = BeginPaint(hwnd, &mut ps);
 
-	let old_bk_mode = SetBkMode(hdc, TRANSPARENT);
+	let width = ps.rcPaint.right - ps.rcPaint.left;
+	let height = ps.rcPaint.bottom - ps.rcPaint.top;
+	println!("{} {}", width, height);
+	let back_hdc = CreateCompatibleDC(front_hdc);
+	let bmp = CreateCompatibleBitmap(front_hdc, width, height);
+	let old_bmp = SelectObject(back_hdc, bmp);
+
+	let old_bg = SelectObject(back_hdc, GetStockObject(WHITE_BRUSH));
+	Rectangle(back_hdc, 0, 0, width, height);
+	SelectObject(back_hdc, old_bg);
+
+	let old_brush = SelectObject(back_hdc, GetStockObject(DC_BRUSH));
+	let old_pen   = SelectObject(back_hdc, GetStockObject(DC_PEN));
+	let old_font  = SelectObject(back_hdc, GetStockObject(ANSI_FIXED_FONT));
+	
+	let old_brush_color = SetDCBrushColor(back_hdc, 0x00FFAAAA as COLORREF); //0x00bbggrr
+	let old_pen_color   = SetDCPenColor  (back_hdc, 0x00FFDDDD as COLORREF); //0x00bbggrr 
+	for &rect in canvas.rects.iter() {
+		Rectangle(back_hdc, rect.lt.x as c_int, rect.lt.y as c_int, rect.rb.x as c_int, rect.rb.y as c_int);
+	}
+	SetDCBrushColor(back_hdc, old_brush_color);
+	SetDCPenColor(back_hdc, old_pen_color);
+
+	let old_bk_mode = SetBkMode(back_hdc, TRANSPARENT);
 	for &(pos, ref block) in canvas.text_blocks.iter() {
 		let text: Vec<u16> = block.text.as_slice().utf16_units().chain(Some(0).into_iter()).collect::<Vec<u16>>();
-		TextOutW(hdc, pos.x as c_int, pos.y as c_int, text.as_ptr(), text.len() as c_int);
+		TextOutW(back_hdc, pos.x as c_int, pos.y as c_int, text.as_ptr(), text.len() as c_int);
 	}
-	SetBkMode(hdc, old_bk_mode);
+	SetBkMode(back_hdc, old_bk_mode);
 
-	SelectObject(hdc, old_obj);
+	BitBlt(front_hdc, 0, 0, width, height, back_hdc, 0, 0, SRCCOPY);
+
+	SelectObject(back_hdc, old_font);
+	SelectObject(back_hdc, old_pen);
+	SelectObject(back_hdc, old_brush);
+	SelectObject(back_hdc, old_bmp);
+	DeleteObject(bmp);
+	DeleteDC(back_hdc);
+
 	EndPaint(hwnd, &ps);
 }
 
@@ -427,13 +481,17 @@ unsafe fn window_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> 
 			0
 		},
 
-		WM_PAINT => {		
+		WM_PAINT => {
 			paint(hwnd, &stage(buffer));
 			0
 		},
 
 		WM_DESTROY => {
 			PostQuitMessage(0);
+			0
+		},
+
+		WM_ERASEBKGND => {
 			0
 		},
 
